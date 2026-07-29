@@ -1,0 +1,13 @@
+# Framework de testes (Usado no Unitário e Integração)
+pytest>=7.0.0
+
+# Azure SDKs - Autenticação (Usado na Integração)
+azure-identity>=1.15.0
+
+# Azure SDKs - Management Plane / IaaS & PaaS (Usado na Integração)
+azure-mgmt-resource>=23.0.0
+azure-mgmt-network>=25.0.0
+azure-mgmt-web>=7.0.0
+
+# Azure SDKs - Data Plane (Usado na Integração)
+azure-storage-blob>=12.19.0

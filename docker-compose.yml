@@ -1,0 +1,28 @@
+services:
+  localstack:
+    container_name: localstack-azure
+    image: localstack/localstack-azure-alpha:latest
+    user: root
+    ports:
+      - "4566:4566"
+    networks:
+      localstack-net:
+        ipv4_address: 10.0.2.20
+    environment:
+      - DEBUG=${DEBUG:-0}
+      - PERSISTENCE=${PERSISTENCE:-0}
+      # Allow connections from Docker containers on host network
+      - HOSTNAME_EXTERNAL=localhost
+      - LOCALSTACK_AUTH_TOKEN=${LOCALSTACK_AUTH_TOKEN- }
+      - "ACCEPT_EULA=Y"
+      - "MSSQL_ACCEPT_EULA=Y"
+      - DEBUG=1
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+networks:
+  localstack-net:
+    name: iac-networks
+    ipam:
+      config:
+        - subnet: 10.0.2.0/24

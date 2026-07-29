@@ -1,0 +1,235 @@
+terraform {
+  required_providers {
+    azurerm = {
+      source  = "hashicorp/azurerm"
+      version = "~> 3.0" # Compatível com as APIs emuladas pelo LocalStack
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
+# CONFIGURAÇÃO DO PROVIDER (Bypass para LocalStack)
+# -----------------------------------------------------------------------------
+provider "azurerm" {
+  features {
+    key_vault {
+      purge_soft_delete_on_destroy    = true
+      recover_soft_deleted_key_vaults = false
+    }
+  }
+  
+  # Credenciais fictícias obrigatórias para o provider não falhar localmente
+  subscription_id = "00000000-0000-0000-0000-000000000000"
+  tenant_id       = "00000000-0000-0000-0000-000000000000"
+  client_id       = "00000000-0000-0000-0000-000000000000"
+  client_secret   = "localstack-dummy-secret"
+}
+
+# -----------------------------------------------------------------------------
+# GRUPO DE RECURSOS
+# -----------------------------------------------------------------------------
+resource "azurerm_resource_group" "rg" {
+  name     = "rg-secure-app-local"
+  location = "eastus"
+}
+
+# -----------------------------------------------------------------------------
+# IDENTIDADE E ACESSO (IAM)
+# -----------------------------------------------------------------------------
+resource "azurerm_user_assigned_identity" "app_identity" {
+  name                = "id-secure-app-local"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+# -----------------------------------------------------------------------------
+# REDE E SEGURANÇA (VNet, Subnets, NSG)
+# -----------------------------------------------------------------------------
+resource "azurerm_virtual_network" "vnet" {
+  name                = "vnet-secure-app"
+  address_space       = ["10.0.0.0/16"]
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+}
+
+resource "azurerm_subnet" "snet_app" {
+  name                 = "snet-app"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.1.0/24"]
+  
+  # Habilita service endpoints para comunicação segura interna
+  service_endpoints    = ["Microsoft.Sql", "Microsoft.Storage", "Microsoft.KeyVault"]
+}
+
+resource "azurerm_subnet" "snet_db" {
+  name                 = "snet-database"
+  resource_group_name  = azurerm_resource_group.rg.name
+  virtual_network_name = azurerm_virtual_network.vnet.name
+  address_prefixes     = ["10.0.2.0/24"]
+}
+
+resource "azurerm_network_security_group" "nsg_app" {
+  name                = "nsg-app-inbound"
+  location            = azurerm_resource_group.rg.location
+  resource_group_name = azurerm_resource_group.rg.name
+
+  security_rule {
+    name                       = "AllowHTTPS"
+    priority                   = 100
+    direction                  = "Inbound"
+    access                     = "Allow"
+    protocol                   = "Tcp"
+    source_port_range          = "*"
+    destination_port_range     = "443"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+
+  security_rule {
+    name                       = "DenyAllInbound"
+    priority                   = 4096
+    direction                  = "Inbound"
+    access                     = "Deny"
+    protocol                   = "*"
+    source_port_range          = "*"
+    destination_port_range     = "*"
+    source_address_prefix      = "*"
+    destination_address_prefix = "*"
+  }
+}
+
+resource "azurerm_subnet_network_security_group_association" "nsg_assoc" {
+  subnet_id                 = azurerm_subnet.snet_app.id
+  network_security_group_id = azurerm_network_security_group.nsg_app.id
+}
+
+# -----------------------------------------------------------------------------
+# KEY VAULT E SEGREDOS
+# -----------------------------------------------------------------------------
+resource "azurerm_key_vault" "kv" {
+  name                          = "kv-secapp-local-001"
+  location                      = azurerm_resource_group.rg.location
+  resource_group_name           = azurerm_resource_group.rg.name
+  tenant_id                     = "00000000-0000-0000-0000-000000000000"
+  sku_name                      = "standard"
+  purge_protection_enabled      = false
+  
+  # Rede: Acesso público desabilitado, aceita apenas tráfego da VNet
+  public_network_access_enabled = false
+  network_acls {
+    default_action             = "Deny"
+    bypass                     = "AzureServices"
+    virtual_network_subnet_ids = [azurerm_subnet.snet_app.id]
+  }
+
+  # Política para o "Administrador" (Terraform/LocalStack)
+  access_policy {
+    tenant_id = "00000000-0000-0000-0000-000000000000"
+    object_id = "00000000-0000-0000-0000-000000000000"
+    secret_permissions = ["Get", "List", "Set", "Delete", "Purge"]
+  }
+
+  # Política para a Identidade Gerenciada da Aplicação
+  access_policy {
+    tenant_id = "00000000-0000-0000-0000-000000000000"
+    object_id = azurerm_user_assigned_identity.app_identity.principal_id
+    secret_permissions = ["Get", "List"]
+  }
+}
+
+resource "azurerm_key_vault_secret" "db_password" {
+  name         = "db-admin-password"
+  value        = "S3cur3P@ssw0rd2026!" # Em ambiente real, gerar dinamicamente
+  key_vault_id = azurerm_key_vault.kv.id
+  depends_on   = [azurerm_key_vault.kv]
+}
+
+# -----------------------------------------------------------------------------
+# STORAGE ACCOUNT (Blobs e Logs)
+# -----------------------------------------------------------------------------
+resource "azurerm_storage_account" "sa" {
+  name                            = "sasecureapplocal001"
+  resource_group_name             = azurerm_resource_group.rg.name
+  location                        = azurerm_resource_group.rg.location
+  account_tier                    = "Standard"
+  account_replication_type        = "LRS"
+  
+  # Requisitos de Segurança
+  public_network_access_enabled   = false
+  https_traffic_only_enabled      = true
+  allow_nested_items_to_be_public = false
+
+  network_rules {
+    default_action             = "Deny"
+    virtual_network_subnet_ids = [azurerm_subnet.snet_app.id]
+    bypass                     = ["AzureServices"]
+  }
+}
+
+# -----------------------------------------------------------------------------
+# BANCO DE DADOS (SQL Server)
+# -----------------------------------------------------------------------------
+resource "azurerm_mssql_server" "sql_server" {
+  name                         = "sql-secure-app-local"
+  resource_group_name          = azurerm_resource_group.rg.name
+  location                     = azurerm_resource_group.rg.location
+  version                      = "12.0"
+  administrator_login          = "sqladmin"
+  administrator_login_password = azurerm_key_vault_secret.db_password.value
+
+  # Bloqueio de acesso público
+  public_network_access_enabled = false
+}
+
+resource "azurerm_mssql_database" "sqldb" {
+  name        = "db-secure-app"
+  server_id   = azurerm_mssql_server.sql_server.id
+  sku_name    = "Basic"
+  
+  # Criptografia em repouso
+  transparent_data_encryption_enabled = true
+}
+
+# Regra de VNet permitindo que apenas a subnet da aplicação acesse o banco
+resource "azurerm_mssql_virtual_network_rule" "sql_vnet_rule" {
+  name      = "sql-vnet-rule-app"
+  server_id = azurerm_mssql_server.sql_server.id
+  subnet_id = azurerm_subnet.snet_app.id
+}
+
+# -----------------------------------------------------------------------------
+# CAMADA DE APLICAÇÃO (App Service)
+# -----------------------------------------------------------------------------
+resource "azurerm_service_plan" "app_plan" {
+  name                = "asp-secure-app-local"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  os_type             = "Linux"
+  sku_name            = "B1"
+}
+
+resource "azurerm_linux_web_app" "webapp" {
+  name                = "app-secure-app-local"
+  resource_group_name = azurerm_resource_group.rg.name
+  location            = azurerm_resource_group.rg.location
+  service_plan_id     = azurerm_service_plan.app_plan.id
+  
+  # Forçar tráfego seguro
+  https_only          = true
+
+  identity {
+    type         = "UserAssigned"
+    identity_ids = [azurerm_user_assigned_identity.app_identity.id]
+  }
+
+  site_config {
+    always_on = true
+  }
+
+  app_settings = {
+    "WEBSITE_RUN_FROM_PACKAGE" = "1"
+    "KeyVaultUri"              = azurerm_key_vault.kv.vault_uri
+    "StorageAccountName"       = azurerm_storage_account.sa.name
+  }
+}
